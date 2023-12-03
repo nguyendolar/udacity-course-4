@@ -1,0 +1,226 @@
+org: nguyendolar
+app: serverless-todo-app
+service: serverless-todo-app
+
+plugins:
+- serverless-iam-roles-per-function
+
+frameworkVersion: '3.38.0'
+
+provider:
+  name: aws
+  runtime: nodejs16.x
+
+  stage: ${opt:stage, 'dev'}
+  region: ${opt:region, 'us-east-1'}
+
+  # X-Ray tracing
+  tracing:
+    lambda: true
+    apiGateway: true
+
+  # API Gateway CORS
+  httpApi:
+    cors: true
+
+  # Environment variables
+  environment:
+    ITEM_TABLE: Todos-Table-${self:provider.stage}
+    ITEM_CREATED_AT_INDEX: CreatedAtId
+    ATTACHMENT_BUCKET_NAME: udacity-todos-${self:provider.stage}-1
+    SIGNED_URL_EXPIRATION: 300
+
+  logs:
+    # Enalbe API gateway logs
+    restApi: true
+
+  iam:
+    role:
+      statements:
+      - Effect: 'Allow'
+        Action:
+        - "xray:PutTraceSegments"
+        - "xray:PutTelemetryRecords"
+        Resource:
+        - "*"
+
+functions:
+
+  Auth:
+    handler: src/lambda/auth/auth0Authorizer.handler
+
+  # GetTodos: Get Item
+  GetTodos:
+    handler: src/lambda/http/getTodos.handler
+    events:
+    - http:
+        method: get
+        path: todos
+        cors: true
+        authorizer: Auth
+    iamRoleStatementsInherit: true
+    iamRoleStatements:
+    - Effect: 'Allow'
+      Action:
+      - 'dynamodb:Query'
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.ITEM_TABLE}
+
+
+  # CreateTodo: Create Item
+  CreateTodo:
+    handler: src/lambda/http/createTodo.handler
+    events:
+    - http:
+        method: post
+        path: todos
+        authorizer: Auth
+        cors: true
+        request:
+          schemas:
+            application/json: ${file(models/create-todo-request.json)}
+    iamRoleStatementsInherit: true
+    iamRoleStatements:
+    - Effect: 'Allow'
+      Action:
+      - 'dynamodb:GetItem'
+      - 'dynamodb:PutItem'
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.ITEM_TABLE}
+
+
+  # UpdateTodo: Update Item
+  UpdateTodo:
+    handler: src/lambda/http/updateTodo.handler
+    events:
+    - http:
+        method: patch
+        path: todos/{todoId}
+        authorizer: Auth
+        cors: true
+        request:
+          schemas:
+            application/json: ${file(models/update-todo-request.json)}
+    iamRoleStatementsInherit: true
+    iamRoleStatements:
+    - Effect: 'Allow'
+      Action:
+      - 'dynamodb:UpdateItem'
+      - 'dynamodb:Query'
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.ITEM_TABLE}
+
+  # DeleteTodo: Delete Item
+  DeleteTodo:
+    handler: src/lambda/http/deleteTodo.handler
+    events:
+    - http:
+        method: delete
+        path: todos/{todoId}
+        authorizer: Auth
+        cors: true
+    iamRoleStatementsInherit: true
+    iamRoleStatements:
+    - Effect: 'Allow'
+      Action:
+      - 'dynamodb:DeleteItem'
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.ITEM_TABLE}
+
+  # GenerateUploadUrl for Put & Get Object
+  GenerateUploadUrl:
+    handler: src/lambda/http/generateUploadUrl.handler
+    events:
+    - http:
+        method: post
+        path: todos/{todoId}/attachment
+        authorizer: Auth
+        cors: true
+    iamRoleStatementsInherit: true
+    iamRoleStatements:
+    - Effect: 'Allow'
+      Action:
+      - 's3:PutObject'
+      - 's3:GetObject'
+      Resource: arn:aws:s3:::${self:provider.environment.ATTACHMENT_BUCKET_NAME}/*
+    - Effect: 'Allow'
+      Action:
+      - 'dynamodb:UpdateItem'
+      - 'dynamodb:Query'
+      Resource: arn:aws:dynamodb:${self:provider.region}:*:table/${self:provider.environment.ITEM_TABLE}
+
+resources:
+  Resources:
+    GatewayResponseDefault4XX:
+      Type: AWS::ApiGateway::GatewayResponse
+      Properties:
+        ResponseParameters:
+          gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+          gatewayresponse.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+          gatewayresponse.header.Access-Control-Allow-Methods: "'GET,OPTIONS,POST,PUT,DELETE'"
+        ResponseType: DEFAULT_4XX
+        RestApiId:
+          Ref: ApiGatewayRestApi
+
+    # DynamoDB Table with Local and Secondary Indexes
+    TodoTable:
+      Type: AWS::DynamoDB::Table
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+      Properties:
+        AttributeDefinitions:
+        - AttributeName: userId
+          AttributeType: S
+        - AttributeName: todoId
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+        KeySchema:
+        - AttributeName: userId #Partion key
+          KeyType: HASH
+        - AttributeName: todoId #Sort key
+          KeyType: RANGE
+        BillingMode: PAY_PER_REQUEST
+        TableName: ${self:provider.environment.ITEM_TABLE}
+        LocalSecondaryIndexes:
+        - IndexName: ${self:provider.environment.ITEM_CREATED_AT_INDEX}
+          KeySchema:
+          - AttributeName: userId #Partion key
+            KeyType: HASH
+          - AttributeName: createdAt #index
+            KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+    # S3 Bucket
+    AttachmentsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ${self:provider.environment.ATTACHMENT_BUCKET_NAME}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: false
+          BlockPublicPolicy: false
+          IgnorePublicAcls: false
+          RestrictPublicBuckets: false
+        CorsConfiguration:
+          CorsRules:
+          - AllowedOrigins:
+            - '*'
+            AllowedHeaders:
+            - '*'
+            AllowedMethods:
+            - GET
+            - PUT
+            - POST
+            - DELETE
+            - HEAD
+            MaxAge: 3000
+    BucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        PolicyDocument:
+          Id: MyPolicy
+          Version: "2012-10-17"
+          Statement:
+          - Sid: PublicReadForGetBucketObjects
+            Effect: Allow
+            Principal: '*'
+            Action: 's3:GetObject'
+            Resource: 'arn:aws:s3:::${self:provider.environment.ATTACHMENT_BUCKET_NAME}/*'
+        Bucket: !Ref AttachmentsBucket
