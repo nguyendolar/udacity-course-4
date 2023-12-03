@@ -34,16 +34,6 @@ provider:
     # Enalbe API gateway logs
     restApi: true
 
-  iam:
-    role:
-      statements:
-      - Effect: 'Allow'
-        Action:
-        - "xray:PutTraceSegments"
-        - "xray:PutTelemetryRecords"
-        Resource:
-        - "*"
-
 functions:
 
   Auth:
